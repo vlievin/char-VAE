@@ -1,0 +1,9 @@
+*.pyc
+data_LMR
+data_WMT
+logs
+logsaved
+Sandbox.ipynb
+Sandbox_data.ipynb
+.ipynb_checkpoints
+*.html
