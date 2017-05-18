@@ -37,13 +37,14 @@ class Vrae:
             dtype = tf.float32
         # clear the default graph
         tf.reset_default_graph()
-        self.batch_size = batch_size
+        self.batch_size_value = batch_size
         # placeholders
+        self.batch_size = tf.placeholder( tf.int32 , name='batch_size')
         self.input_keep_prob_value = input_keep_prob
         self.output_keep_prob_value = output_keep_prob
-        self.x_input = tf.placeholder( tf.int32, [batch_size, None], name='input_placeholder')
-        self.x_input_lenghts = tf.placeholder(shape=(batch_size,), dtype=tf.int32, name='encoder_inputs_length')
-        self.weights_input = tf.placeholder( tf.int32, [batch_size, None], name='weights_placeholder')
+        self.x_input = tf.placeholder( tf.int32, [None, None], name='input_placeholder')
+        self.x_input_lenghts = tf.placeholder(shape=(None,), dtype=tf.int32, name='encoder_inputs_length')
+        self.weights_input = tf.placeholder( tf.int32, [None, None], name='weights_placeholder')
         self.input_keep_prob = tf.placeholder(dtype,name="input_keep_prob")
         self.output_keep_prob = tf.placeholder(dtype,name="output_keep_prob")
         self.max_sentence_size = tf.reduce_max(self.x_input_lenghts )
@@ -55,7 +56,7 @@ class Vrae:
         tf.summary.scalar("Beta", self.B)
         tf.summary.scalar("learning_rate", self.learning_rate)
         tf.summary.scalar("epoch", self.epoch)
-        tf.summary.scalar("sentences max length", self.max_sentence_size)
+        tf.summary.scalar("sentences_max_length", self.max_sentence_size)
         # prepare the input
         with tf.name_scope("input_transformations"):
             inputs_onehot = tf.one_hot(self.x_input, num_symbols, axis= -1, dtype=dtype)   # one hot encoding
@@ -65,10 +66,10 @@ class Vrae:
         # encoder
         encoder_output = encoder(state_size, num_layers, rnn_inputs, dtype,cell_type, self.input_keep_prob, self.output_keep_prob, scope="encoder")     
         # stochastic layer
-        self.z, self.z_mu, self.z_ls2 = stochasticLayer(encoder_output, latent_dim, batch_size,
+        self.z, self.z_mu, self.z_ls2 = stochasticLayer(encoder_output, latent_dim, self.batch_size,
                                                         dtype, scope="stochastic_layer")
         # decoder
-        self.decoder_output = decoder(self.z, batch_size, state_size, num_layers, 
+        self.decoder_output = decoder(self.z, self.batch_size, state_size, num_layers, 
                                       data_dim, self.x_input_lenghts, dtype, cell_type, 
                                       self.input_keep_prob, self.output_keep_prob, scope="decoder") 
         # loss
@@ -104,7 +105,8 @@ class Vrae:
                                                            self.weights_input: batch_weights,
                                                            self.input_keep_prob:self.input_keep_prob_value, 
                                                            self.output_keep_prob:self.output_keep_prob_value,
-                                                           self.epoch: epoch
+                                                           self.epoch: epoch,
+                                                           self.batch_size:self.batch_size_value                                 
                                                             })
     
     def reconstruct(self, sess, padded_batch_xs, batch_lengths, batch_weights):
@@ -122,7 +124,14 @@ class Vrae:
                 z_log_sigma_sq_val: log of sigma^2 of the prior
                 sequence_loss: average cross entropy
         """
-        return sess.run((self.decoder_output,self.z, self.z_mu, self.z_ls2, self.loss), feed_dict={self.x_input: padded_batch_xs,self.x_input_lenghts:batch_lengths,self.weights_input: batch_weights, self.B: 1,self.input_keep_prob:1, self.output_keep_prob:1})
+        return sess.run((self.decoder_output,self.z, self.z_mu, self.z_ls2, self.loss), 
+                        feed_dict={self.x_input: padded_batch_xs,
+                                   self.x_input_lenghts:batch_lengths,
+                                   self.weights_input: batch_weights, 
+                                   self.B: 1,
+                                   self.input_keep_prob:1, 
+                                   self.output_keep_prob:1,
+                                   self.batch_size:self.batch_size_value })
     
     def zToX(self,sess,z_sample,s_length):
         """
@@ -134,9 +143,13 @@ class Vrae:
         Returns:
             x generated from z 
         """
-        s_lengths = [s_length for _ in xrange(self.batch_size)]
-        z_samples = [z_sample for _ in xrange(self.batch_size)]
-        return sess.run((self.decoder_output), feed_dict={self.z: z_samples,self.x_input_lenghts:s_lengths,self.input_keep_prob:1, self.output_keep_prob:1})
+        s_lengths = [s_length]
+        z_samples = [z_sample]
+        return sess.run((self.decoder_output), feed_dict={self.z: z_samples,
+                                                          self.x_input_lenghts:s_lengths,
+                                                          self.input_keep_prob:1, 
+                                                          self.output_keep_prob:1,
+                                                          self.batch_size:1 })
     
     def XToz(self,sess,x_sample):
         """
@@ -147,8 +160,11 @@ class Vrae:
         Returns:
             x generated from z 
         """
-        x_samples = [x_sample for _ in xrange(self.batch_size)]
-        return sess.run((self.z_mu), feed_dict={self.x_input: x_samples ,self.input_keep_prob:1, self.output_keep_prob:1})
+        x_samples = [x_sample]
+        return sess.run((self.z_mu), feed_dict={self.x_input: x_samples,
+                                                self.input_keep_prob:1, 
+                                                self.output_keep_prob:1,
+                                                self.batch_size:1})
     
     
 def encoder(state_size, num_layers, rnn_inputs, dtype, cell_type, input_keep_prob, output_keep_prob, scope="encoder"):

@@ -37,7 +37,7 @@ tf.app.flags.DEFINE_integer("sequence_min", 15, "minimum number of characters")
 tf.app.flags.DEFINE_integer("sequence_max", 30, "maximum number of characters")
 tf.app.flags.DEFINE_integer("epoches", 10000, "Number of epoches")
 tf.app.flags.DEFINE_integer("acceptable_accuracy", 0.8, "Increase sentences length when the model reach this accuracy")
-tf.app.flags.DEFINE_integer("input_keep_prob", 0.8, "Dropout keep prob for inputs")
+tf.app.flags.DEFINE_integer("input_keep_prob", 0.5, "Dropout keep prob for inputs")
 tf.app.flags.DEFINE_integer("output_keep_prob", 0.5, "Dropout keep prob for outpus")
 tf.app.flags.DEFINE_string("cell", "LSTM", "cell type: LSTM,GRU,LNLSTM")
 tf.app.flags.DEFINE_integer("beta_period", 10, "number of epoches before increase Beta.")
@@ -45,17 +45,23 @@ tf.app.flags.DEFINE_integer("beta_period", 10, "number of epoches before increas
 #tf.app.flags.DEFINE_integer("beta_offset", 1000, "Beta will start rising after this number of iterations")
 tf.app.flags.DEFINE_float("latent_loss_weight", 0.01, "weight used to weaken the latent loss.")
 tf.app.flags.DEFINE_integer("dtype_precision", 32, "dtype to be used: typically 32 or 16")
-tf.app.flags.DEFINE_boolean("initialize", False, "Initialize model or try to load existing one")
+tf.app.flags.DEFINE_boolean("initialize", True, "Initialize model or try to load existing one")
 tf.app.flags.DEFINE_string("training_dir" , "auto", "repertory where checkpoints are logs are saved")
 FLAGS = tf.app.flags.FLAGS
 
 if FLAGS.training_dir == "auto":
     FLAGS.training_dir = "logs/state"+str(FLAGS.state_size)+"_layers"+str(FLAGS.num_layers)+"_latent"+str(FLAGS.latent_dim)+"_batch"+str(FLAGS.batch_size)+"_"+str(FLAGS.cell)+"_seqs"+str(FLAGS.sequence_min)+"-"+str(FLAGS.sequence_max)+"_"+str(FLAGS.initial_learning_rate)[-1]+"e"+str(int(np.log10(FLAGS.initial_learning_rate)))+"_B"+str(FLAGS.latent_loss_weight)+"_f"+str(FLAGS.dtype_precision)
-
-
+else:
+    FLAGS.training_dir = "logs/"+FLAGS.training_dir
+    
+seq_max_init = 30
+sequence_max_max = FLAGS.sequence_max
+FLAGS.sequence_max = seq_max_init
+    
 training_parameters = dict()
 
 if FLAGS.initialize:
+    #print "||" + str(os.listdir(FLAGS.training_dir))
     print "Checkin in: " + str(FLAGS.training_dir)
     assert not os.path.isdir(FLAGS.training_dir) or len(os.listdir(FLAGS.training_dir)) == 0
     print "logging in: " + str(FLAGS.training_dir)
@@ -70,7 +76,7 @@ else:
     print "found: " + str(FLAGS.training_dir)
     with open(FLAGS.training_dir +'/training_parameters.json', 'r') as fp:
         training_parameters = json.loads( fp.read() )
-    training_parameters['learning_rate'] = 2e-4#FLAGS.initial_learning_rate
+    #training_parameters['learning_rate'] = 2e-4#FLAGS.initial_learning_rate
     
 
 # save details
@@ -150,7 +156,7 @@ try:
                 training_parameters['step'] += 1 
                 
                 # increase sentences size
-                if training_parameters['n_epoches_since_last_dataset_update'] > 5 and d < FLAGS.acceptable_accuracy and training_parameters['seq_max'] < 50:
+                if training_parameters['n_epoches_since_last_dataset_update'] > 5 and d < FLAGS.acceptable_accuracy and training_parameters['seq_max'] < sequence_max_max:
                     print "###########################\nUPDATING SENTENCES SIZE"
                     FLAGS.training_dir + '/model'+str(training_parameters['seq_max'])+'.ckp'
                     n_epoches_since_last_dataset_update = 0
