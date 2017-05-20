@@ -32,7 +32,6 @@ class Generator:
         self.step = 0
         assert len(self.x) == len(self.y)
         assert self.n_steps > 0
-        self.shuffle()
         
     def iterations_per_epoch(self):
         """

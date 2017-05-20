@@ -13,9 +13,17 @@ __email__ = "valentin.lievin@gmail.com"
 __status__ = "Development"
 """    
 import tensorflow as tf
+from tensorflow.python.util import nest
+from tensorflow.python.framework import constant_op
+from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import ops
+from tensorflow.python.framework import tensor_shape
+from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import tensor_array_ops
+
 
 class Vrae:
-    def __init__(self, state_size, num_layers, latent_dim, batch_size, num_symbols, input_keep_prob,output_keep_prob, latent_loss_weight, dtype_precision, cell_type):
+    def __init__(self, state_size, num_layers, latent_dim, batch_size, num_symbols, input_keep_prob,output_keep_prob, latent_loss_weight, dtype_precision, cell_type, teacher_forcing=True):
         """
         Initi Variational Recurrent Autoencoder (VRAE) for sequences. The model clears the current tf graph and implements this model as the new graph. 
         Args:
@@ -29,6 +37,7 @@ class Vrae:
             latent_loss_weight (float): weight used to weaken the regularization/latent loss
             dtype_precision (Integer): dtype precision
             cell_type (string): type of cell: LSTM,GRU,LNLSTM
+            teacher_forcing (bool): use teacher forcing during training
         Returns 
         """
         if dtype_precision==16:
@@ -48,6 +57,8 @@ class Vrae:
         self.input_keep_prob = tf.placeholder(dtype,name="input_keep_prob")
         self.output_keep_prob = tf.placeholder(dtype,name="output_keep_prob")
         self.max_sentence_size = tf.reduce_max(self.x_input_lenghts )
+        self.training = tf.placeholder( tf.bool, name="training_state")
+        self.teacher_forcing = teacher_forcing
         with tf.name_scope("training_parameters"):
             self.B = tf.placeholder(dtype, name='Beta_deterministic_warmup')
             self.learning_rate = tf.placeholder(dtype, shape=[], name='learning_rate')
@@ -70,8 +81,8 @@ class Vrae:
                                                         dtype, scope="stochastic_layer")
         # decoder
         self.decoder_output = decoder(self.z, self.batch_size, state_size, num_layers, 
-                                      data_dim, self.x_input_lenghts, dtype, cell_type, 
-                                      self.input_keep_prob, self.output_keep_prob, scope="decoder") 
+                                      data_dim, self.x_input_lenghts, cell_type, 
+                                      self.input_keep_prob, self.output_keep_prob, inputs_onehot, self.training,dtype, scope="decoder") 
         # loss
         self.loss = loss_function(self.decoder_output, self.x_input, 
                                   self.weights_input,self.z_ls2, self.z_mu, 
@@ -106,7 +117,8 @@ class Vrae:
                                                            self.input_keep_prob:self.input_keep_prob_value, 
                                                            self.output_keep_prob:self.output_keep_prob_value,
                                                            self.epoch: epoch,
-                                                           self.batch_size:self.batch_size_value                                 
+                                                           self.batch_size:self.batch_size_value,
+                                                           self.training: self.teacher_forcing
                                                             })
     
     def reconstruct(self, sess, padded_batch_xs, batch_lengths, batch_weights):
@@ -131,7 +143,8 @@ class Vrae:
                                    self.B: 1,
                                    self.input_keep_prob:1, 
                                    self.output_keep_prob:1,
-                                   self.batch_size:self.batch_size_value })
+                                   self.batch_size:self.batch_size_value,
+                                   self.training: False})
     
     def zToX(self,sess,z_sample,s_length):
         """
@@ -145,11 +158,15 @@ class Vrae:
         """
         s_lengths = [s_length]
         z_samples = [z_sample]
+        none_input = [[0]]
         return sess.run((self.decoder_output), feed_dict={self.z: z_samples,
                                                           self.x_input_lenghts:s_lengths,
                                                           self.input_keep_prob:1, 
                                                           self.output_keep_prob:1,
-                                                          self.batch_size:1 })
+                                                          self.batch_size:1,
+                                                          self.training: False,
+                                                          self.x_input:none_input
+                                                         })
     
     def XToz(self,sess,x_sample):
         """
@@ -164,7 +181,8 @@ class Vrae:
         return sess.run((self.z_mu), feed_dict={self.x_input: x_samples,
                                                 self.input_keep_prob:1, 
                                                 self.output_keep_prob:1,
-                                                self.batch_size:1})
+                                                self.batch_size:1,
+                                                self.training: False})
     
     
 def encoder(state_size, num_layers, rnn_inputs, dtype, cell_type, input_keep_prob, output_keep_prob, scope="encoder"):
@@ -238,7 +256,7 @@ def stochasticLayer(encoder_output, latent_dim, batch_size,dtype, scope="stochas
         return z,z_mu,z_ls2
 
 
-def dynamic_rnn_with_projection_layer( cell_dec, z_input, x_input_lenghts, W_proj, b_proj, batch_size, state_size, data_dim, dtype, scope="dynamic_rnn_with_projection_layer"):
+def dynamic_rnn_with_projection_layer( cell_dec, z_input, x_input_lenghts, W_proj, b_proj, batch_size, state_size, data_dim, x_inputs,training,dtype, scope="dynamic_rnn_with_projection_layer"):
     """
     A custom dynamic rnn implemented using the raw_rnn class from Tensorflow. The difference with the dynamic_rnn is the use of a projection layer to feed the true output value to the next step. Indeed, for each cell, the output is a tensor of size (batch_size x state_size). Here we project this output into the expected output value, thus we obtain a Tensor (batch_size x data_dim). Then we output this expected output to the next cell. This makes the model more robust.
     Args:
@@ -250,13 +268,57 @@ def dynamic_rnn_with_projection_layer( cell_dec, z_input, x_input_lenghts, W_pro
         batch_size (Natural Integer): batch size.
         state_size (Natural Integer): RNN cell state size.
         data_dim (Natural Integer): dimension of the data.
+        x_inputs (Tensor): inputs
+        training (bool): training phase or not
         dtype (string): dtype to be used   
         scope (string): scope name
     """
+    # following dynamic_rnn implementation https://github.com/tensorflow/tensorflow/blob/master/tensorflow/python/ops/rnn.py
+    
+    x_inputs = tf.transpose( x_inputs , [1,0,2]) # set time first
+    flat_input = nest.flatten(x_inputs)
+    input_shape = array_ops.shape(flat_input[0])
+    time_steps = input_shape[0]
+    batch_size = input_shape[1]
+    
+    inputs_got_shape = tuple(input_.get_shape().with_rank_at_least(3)
+                           for input_ in flat_input)
+    
+    const_time_steps, const_batch_size = inputs_got_shape[0].as_list()[:2]
+    
+    for shape in inputs_got_shape:
+        if not shape[2:].is_fully_defined():
+            raise ValueError(
+              "Input size (depth of inputs) must be accessible via shape inference,"
+              " but saw value None.")
+    got_time_steps = shape[0].value
+    got_batch_size = shape[1].value
+    if const_time_steps != got_time_steps:
+        raise ValueError(
+          "Time steps is not the same for all the elements in the input in a "
+          "batch.")
+    if const_batch_size != got_batch_size:
+        raise ValueError(
+          "Batch_size is not the same for all the elements in the input.")
+    
+    base_name = "encoder_input_ta"
+    def _create_ta(name, dtype):
+        return tensor_array_ops.TensorArray(dtype=dtype,
+                                        size=time_steps,
+                                        tensor_array_name=base_name + name)
+
+    input_ta = tuple(_create_ta("input_%d" % i, flat_input[i].dtype)
+                   for i in range(len(flat_input)))
+
+    input_ta = tuple(ta.unstack(input_)
+                   for ta, input_ in zip(input_ta, flat_input))
+    
+    input_ta = input_ta[0]
+    
     with tf.name_scope(scope):
         def loop_fn(time, cell_output, cell_state, loop_state):
             emit_output = cell_output  # == None for time == 0
-            prev_out = cell_output
+            #prev_out = cell_output
             elements_finished = (time >= x_input_lenghts) # array or bool
             finished = tf.reduce_all(elements_finished) # check if all elements finished and get a single boolean
             if cell_output is None:  # time == 0
@@ -265,10 +327,13 @@ def dynamic_rnn_with_projection_layer( cell_dec, z_input, x_input_lenghts, W_pro
             else:
                 #emit_output = tf.add(tf.matmul(W_proj,prev_out), b_proj)
                 next_cell_state = cell_state
+                predicted_previous_output = tf.cond(training, 
+                                                    lambda: input_ta.read(time-1), 
+                                                    lambda: tf.nn.softmax(tf.add(tf.matmul(cell_output, W_proj), b_proj) ))
                 next_input_value = tf.cond( # removing this condition leads to the read TensorArray problem: used for dynamic rray
                     finished,
-                    lambda:tf.concat([ tf.zeros([batch_size,state_size], dtype=dtype),  tf.add(tf.matmul(prev_out, W_proj), b_proj)], 1) ,
-                    lambda:tf.concat([z_input, tf.add(tf.matmul(prev_out, W_proj), b_proj) ], 1) )
+                    lambda:tf.concat([ tf.zeros([batch_size,state_size], dtype=dtype), predicted_previous_output], 1) ,
+                    lambda:tf.concat([z_input, predicted_previous_output ], 1) )
             next_input = tf.cond(
                 finished,
                 lambda: tf.zeros([batch_size, data_dim + state_size], dtype=dtype),
@@ -279,7 +344,7 @@ def dynamic_rnn_with_projection_layer( cell_dec, z_input, x_input_lenghts, W_pro
         return tf.nn.raw_rnn(cell_dec, loop_fn)#, parallel_iterations = 1)
 
 
-def decoder(z, batch_size, state_size, num_layers, data_dim, x_input_lenghts, dtype, cell_type, input_keep_prob, output_keep_prob, scope="decoder"):
+def decoder(z, batch_size, state_size, num_layers, data_dim, x_input_lenghts, cell_type, input_keep_prob, output_keep_prob, x_inputs, training, dtype, scope="decoder"):
     """"
     Decoder of the VRAE model. This neural network approximates the posterior distribution p(x|z). The decoder transforms samples z from the prior distribution to a reconstruction of x.
     Args:
@@ -293,6 +358,8 @@ def decoder(z, batch_size, state_size, num_layers, data_dim, x_input_lenghts, dt
         cell_type (string): type of RNN cell
         input_keep_prob (float): dropout keep probability for the inputs
         output_keep_prob (float): dropout keep probability for the outputs
+        x_inputs (Tensor): inputs
+        training (bool): training phase or not
         scope (string): scope name
     Returns:
         A tensor of size (batch_size x None x data_dim) which is a reconstruction of x
@@ -318,7 +385,7 @@ def decoder(z, batch_size, state_size, num_layers, data_dim, x_input_lenghts, dt
             cells.append(cell)
         dec_cell = tf.contrib.rnn.MultiRNNCell(cells)                                 
         # RNN decoder
-        outputs_ta, final_state, _ = dynamic_rnn_with_projection_layer( dec_cell, h_z2dec, x_input_lenghts, W_proj, b_proj, batch_size, state_size, data_dim, dtype, scope="dynamic_rnn_with_projection_layer")
+        outputs_ta, final_state, _ = dynamic_rnn_with_projection_layer( dec_cell, h_z2dec, x_input_lenghts, W_proj, b_proj, batch_size, state_size, data_dim, x_inputs, training, dtype, scope="dynamic_rnn_with_projection_layer")
          # project the output
         rnn_outputs_decoder = outputs_ta.stack()
         decoder_max_steps, decoder_batch_size, decoder_dim = tf.unstack(tf.shape(rnn_outputs_decoder))

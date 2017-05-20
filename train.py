@@ -32,7 +32,7 @@ tf.app.flags.DEFINE_float("learning_rate_change_rate", 1500, "learning rate can 
 tf.app.flags.DEFINE_integer("state_size", 1024, "state size for the RNN cells (used both for encoder and decoder)")
 tf.app.flags.DEFINE_integer("num_layers", 2, "number of layers used in the RNN cells (used both for encoder and decoder)")
 tf.app.flags.DEFINE_integer("latent_dim", 16, "dimension of the latent space")
-tf.app.flags.DEFINE_integer("batch_size", 512, "length of each batch")
+tf.app.flags.DEFINE_integer("batch_size", 256, "length of each batch")
 tf.app.flags.DEFINE_integer("sequence_min", 15, "minimum number of characters")
 tf.app.flags.DEFINE_integer("sequence_max", 30, "maximum number of characters")
 tf.app.flags.DEFINE_integer("epoches", 10000, "Number of epoches")
@@ -41,12 +41,13 @@ tf.app.flags.DEFINE_integer("input_keep_prob", 0.5, "Dropout keep prob for input
 tf.app.flags.DEFINE_integer("output_keep_prob", 0.5, "Dropout keep prob for outpus")
 tf.app.flags.DEFINE_string("cell", "LSTM", "cell type: LSTM,GRU,LNLSTM")
 tf.app.flags.DEFINE_integer("beta_period", 10, "number of epoches before increase Beta.")
+tf.app.flags.DEFINE_boolean("teacher_forcing", False, "Teacher forcing increases short term accuracy but penalizes long term gradient probagation.")
 #tf.app.flags.DEFINE_integer("beta_period", 1000, "Beta will rise from 0 to 1 during this number of iterations")
 #tf.app.flags.DEFINE_integer("beta_offset", 1000, "Beta will start rising after this number of iterations")
 tf.app.flags.DEFINE_float("latent_loss_weight", 0.01, "weight used to weaken the latent loss.")
 tf.app.flags.DEFINE_integer("dtype_precision", 32, "dtype to be used: typically 32 or 16")
-tf.app.flags.DEFINE_boolean("initialize", True, "Initialize model or try to load existing one")
-tf.app.flags.DEFINE_string("training_dir" , "auto", "repertory where checkpoints are logs are saved")
+tf.app.flags.DEFINE_boolean("initialize", False, "Initialize model or try to load existing one")
+tf.app.flags.DEFINE_string("training_dir" , "no_teacher_forcing", "repertory where checkpoints are logs are saved")
 FLAGS = tf.app.flags.FLAGS
 
 if FLAGS.training_dir == "auto":
@@ -54,7 +55,7 @@ if FLAGS.training_dir == "auto":
 else:
     FLAGS.training_dir = "logs/"+FLAGS.training_dir
     
-seq_max_init = 30
+seq_max_init = min( 30, FLAGS.sequence_max)
 sequence_max_max = FLAGS.sequence_max
 FLAGS.sequence_max = seq_max_init
     
@@ -98,6 +99,7 @@ encoderDecoder = EncoderDecoder()
 num_symbols = encoderDecoder.vocabularySize()
 # batch generator
 batch_gen = Generator(sentences, ratings, FLAGS.batch_size)
+batch_gen.shuffle()
 num_iters = FLAGS.epoches * batch_gen.iterations_per_epoch()
 # deterministic warm-up control
 betaGenerator = BetaGenerator(num_iters, FLAGS.beta_period*batch_gen.iterations_per_epoch(), FLAGS.beta_period*batch_gen.iterations_per_epoch())
@@ -116,7 +118,8 @@ vrae_model = Vrae_model(state_size=FLAGS.state_size,
                          dtype_precision=FLAGS.dtype_precision,
                         cell_type=FLAGS.cell,
                          input_keep_prob= FLAGS.input_keep_prob,
-                        output_keep_prob=FLAGS.input_keep_prob)
+                        output_keep_prob=FLAGS.input_keep_prob,
+                       teacher_forcing=FLAGS.teacher_forcing)
 
 config = tf.ConfigProto(
         #device_count = {'GPU': 0},
@@ -147,7 +150,7 @@ try:
                 # get batch
                 padded_batch_xs, batch_ys, batch_lengths, batch_weights, max_length = batch_gen.next_batch()
                 training_parameters['learning_rate'] = learningRateControler.learning_rate
-                beta = 1#0.01 + betaGenerator(training_parameters['step']) # add small value to points to scatter
+                beta = 0.0 + betaGenerator(training_parameters['step']) # add small value to points to scatter
                 _,d,summary,_ = vrae_model.step(sess, padded_batch_xs, beta, training_parameters['learning_rate'], batch_lengths, batch_weights, training_parameters['epoch'])
                 learningRateControler.update(d)
                 summary_writer.add_summary(summary, global_step=training_parameters['step'])
