@@ -23,7 +23,7 @@ from tensorflow.python.ops import tensor_array_ops
 
 
 class Vrae:
-    def __init__(self, state_size, num_layers, latent_dim, batch_size, num_symbols, input_keep_prob,output_keep_prob, latent_loss_weight, dtype_precision, cell_type, teacher_forcing=True):
+    def __init__(self, state_size, num_layers, latent_dim, batch_size, num_symbols, input_keep_prob,output_keep_prob, latent_loss_weight, dtype_precision, cell_type, peephole, teacher_forcing=True):
         """
         Initi Variational Recurrent Autoencoder (VRAE) for sequences. The model clears the current tf graph and implements this model as the new graph. 
         Args:
@@ -37,6 +37,7 @@ class Vrae:
             latent_loss_weight (float): weight used to weaken the regularization/latent loss
             dtype_precision (Integer): dtype precision
             cell_type (string): type of cell: LSTM,GRU,LNLSTM
+            peephole (boolean): use peepholes or not for LSTM
             teacher_forcing (bool): use teacher forcing during training
         Returns 
         """
@@ -75,16 +76,16 @@ class Vrae:
             rnn_inputs = tf.reverse(inputs_onehot, [1])   # reverse input
         
         # encoder
-        encoder_output = encoder(state_size, num_layers, rnn_inputs, dtype,cell_type, self.input_keep_prob, self.output_keep_prob, scope="encoder")     
+        encoder_output = encoder(state_size, num_layers, rnn_inputs, dtype,cell_type, peephole, self.input_keep_prob, self.output_keep_prob, scope="encoder")     
         # stochastic layer
         self.z, self.z_mu, self.z_ls2 = stochasticLayer(encoder_output, latent_dim, self.batch_size,
                                                         dtype, scope="stochastic_layer")
         # decoder
         self.decoder_output = decoder(self.z, self.batch_size, state_size, num_layers, 
-                                      data_dim, self.x_input_lenghts, cell_type, 
+                                      data_dim, self.x_input_lenghts, cell_type, peephole,
                                       self.input_keep_prob, self.output_keep_prob, inputs_onehot, self.training,dtype, scope="decoder") 
         # loss
-        self.loss = loss_function(self.decoder_output, self.x_input, 
+        self.loss, self.reconstruction_loss, self.latent_loss = loss_function(self.decoder_output, self.x_input, 
                                   self.weights_input,self.z_ls2, self.z_mu, 
                                   self.B, latent_loss_weight, dtype, scope="loss") 
         # optimizer
@@ -109,7 +110,7 @@ class Vrae:
                 current loss
                 summary op
         """
-        return sess.run([self.optimizer, self.loss, self.merged_summary, self.max_sentence_size ], feed_dict={self.x_input: padded_batch_xs, 
+        return sess.run([self.optimizer, self.loss, self.reconstruction_loss, self.latent_loss, self.merged_summary, self.max_sentence_size ], feed_dict={self.x_input: padded_batch_xs, 
                                                            self.B:beta, 
                                                            self.learning_rate: learning_rate,
                                                            self.x_input_lenghts:batch_lengths,
@@ -185,13 +186,15 @@ class Vrae:
                                                 self.training: False})
     
     
-def encoder(state_size, num_layers, rnn_inputs, dtype, cell_type, input_keep_prob, output_keep_prob, scope="encoder"):
+def encoder(state_size, num_layers, rnn_inputs, dtype, cell_type, peephole, input_keep_prob, output_keep_prob, scope="encoder"):
     """
     Encoder of the VRAE model. It corresponds to the approximation of p(z|x), thus encodes the inputs x into a higher level representation z. The encoder is Dynamic Recurrent Neural Network which takes a batch of sequence of arbitray lengths as inputs. The output is the last state of the last cell and corresponds to a representation of the whole input.
     Args:
         state_size (Natural Integer): state size for the RNN cell
         num_layers (Natural Integer): number of layers for the the RNN cell
         rnn_inputs (Tensor): input tensor (batch_size x None x input_dimension)
+        cell_type (String): type of cell to use
+        peephole (Boolean): use peephole for lstm
         dtype (string): dtype
         input_keep_prob (float): dropout keep probability for the inputs
         output_keep_prob (float): dropout keep probability for the outputs
@@ -207,6 +210,12 @@ def encoder(state_size, num_layers, rnn_inputs, dtype, cell_type, input_keep_pro
                 cell_fn = tf.contrib.rnn.LSTMCell
             elif cell_type == 'LNLSTM':
                 cell_fn = tf.contrib.rnn.LayerNormBasicLSTMCell
+            elif cell_type == "UGRNN":
+                cell_fn = tf.contrib.rnn.UGRNNCell
+            elif cell_type == "GLSTM":
+                cell_fn = tf.contrib.rnn.GLSTMCell
+            elif cell_type == "LSTMBlockFusedCell":
+                cell_fn = tf.contrib.rnn.LSTMBlockFusedCell
             
             cells = []
             for _ in range(2 * num_layers):
@@ -216,7 +225,7 @@ def encoder(state_size, num_layers, rnn_inputs, dtype, cell_type, input_keep_pro
             cell_fw = tf.contrib.rnn.MultiRNNCell( cells[:num_layers] )
             cell_bw = tf.contrib.rnn.MultiRNNCell( cells[num_layers:] )
             rnn_outputs, final_state = tf.nn.bidirectional_dynamic_rnn(cell_fw, cell_bw, rnn_inputs, dtype=dtype, scope="Encoder_rnn")
-        if cell_type == 'LSTM':
+        if cell_type == 'LSTM' or cell_type == 'LNLSTM':
             final_state = tf.concat([ state[num_layers-1][0] for state in final_state] , 1)
         else:
             final_state = tf.concat([ state[num_layers-1] for state in final_state] , 1)
@@ -344,7 +353,7 @@ def dynamic_rnn_with_projection_layer( cell_dec, z_input, x_input_lenghts, W_pro
         return tf.nn.raw_rnn(cell_dec, loop_fn)#, parallel_iterations = 1)
 
 
-def decoder(z, batch_size, state_size, num_layers, data_dim, x_input_lenghts, cell_type, input_keep_prob, output_keep_prob, x_inputs, training, dtype, scope="decoder"):
+def decoder(z, batch_size, state_size, num_layers, data_dim, x_input_lenghts, cell_type, peephole, input_keep_prob, output_keep_prob, x_inputs, training, dtype, scope="decoder"):
     """"
     Decoder of the VRAE model. This neural network approximates the posterior distribution p(x|z). The decoder transforms samples z from the prior distribution to a reconstruction of x.
     Args:
@@ -356,6 +365,7 @@ def decoder(z, batch_size, state_size, num_layers, data_dim, x_input_lenghts, ce
         x_input_lenghts (Tensor): lengths of the inputs (batch_len, )
         dtype (string): dtype to be used
         cell_type (string): type of RNN cell
+        peephole (Boolean): use peephole for lstm
         input_keep_prob (float): dropout keep probability for the inputs
         output_keep_prob (float): dropout keep probability for the outputs
         x_inputs (Tensor): inputs
@@ -378,6 +388,12 @@ def decoder(z, batch_size, state_size, num_layers, data_dim, x_input_lenghts, ce
             cell_fn = tf.contrib.rnn.LSTMCell
         elif cell_type == 'LNLSTM':
             cell_fn = tf.contrib.rnn.LayerNormBasicLSTMCell
+        elif cell_type == "UGRNN":
+            cell_fn = tf.contrib.rnn.UGRNNCell
+        elif cell_type == "GLSTM":
+            cell_fn = tf.contrib.rnn.GLSTMCell
+        elif cell_type == "LSTMBlockFusedCell":
+            cell_fn = tf.contrib.rnn.LSTMBlockFusedCell
         cells = []
         for _ in range(num_layers):
             cell = cell_fn(state_size)
@@ -454,7 +470,7 @@ def loss_function(x_reconstr_mean, x_input, weights_input,z_ls2, z_mu, B, latent
         tf.summary.scalar("reconstruction_loss", reconstruction_loss)
         tf.summary.scalar("latent_loss", tf.reduce_mean(latent_loss) )
         tf.summary.scalar("loss", loss)
-        return loss
+        return loss, reconstruction_loss, latent_loss
                     
 def optimizationOperation(cost, learning_rate, scope="training_step"):
     """

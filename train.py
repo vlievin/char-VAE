@@ -27,27 +27,29 @@ from training_utilities import BetaGenerator, LearningRateControler
 from batch import Generator
 
 # flags
-tf.app.flags.DEFINE_float("initial_learning_rate", 0.0008, "initial learning rate")
-tf.app.flags.DEFINE_float("learning_rate_change_rate", 1500, "learning rate can be updated after this number of iterations")
-tf.app.flags.DEFINE_integer("state_size", 1024, "state size for the RNN cells (used both for encoder and decoder)")
-tf.app.flags.DEFINE_integer("num_layers", 2, "number of layers used in the RNN cells (used both for encoder and decoder)")
-tf.app.flags.DEFINE_integer("latent_dim", 16, "dimension of the latent space")
+tf.app.flags.DEFINE_float("initial_learning_rate", 0.001, "initial learning rate")
+tf.app.flags.DEFINE_float("learning_rate_change_rate", 3000, "learning rate can be updated after this number of iterations")
+tf.app.flags.DEFINE_integer("state_size", 800, "state size for the RNN cells (used both for encoder and decoder)")
+tf.app.flags.DEFINE_integer("num_layers", 4, "number of layers used in the RNN cells (used both for encoder and decoder)")
+tf.app.flags.DEFINE_integer("latent_dim", 25, "dimension of the latent space")
 tf.app.flags.DEFINE_integer("batch_size", 256, "length of each batch")
-tf.app.flags.DEFINE_integer("sequence_min", 15, "minimum number of characters")
-tf.app.flags.DEFINE_integer("sequence_max", 30, "maximum number of characters")
+tf.app.flags.DEFINE_integer("sequence_min", 8, "minimum number of characters")
+tf.app.flags.DEFINE_integer("sequence_max", 35, "maximum number of characters")
 tf.app.flags.DEFINE_integer("epoches", 10000, "Number of epoches")
-tf.app.flags.DEFINE_integer("acceptable_accuracy", 0.8, "Increase sentences length when the model reach this accuracy")
-tf.app.flags.DEFINE_integer("input_keep_prob", 0.5, "Dropout keep prob for inputs")
+tf.app.flags.DEFINE_integer("acceptable_accuracy", 0.4, "Increase sentences length when the model reaches this accuracy")
+tf.app.flags.DEFINE_integer("input_keep_prob", 0.9, "Dropout keep prob for inputs")
 tf.app.flags.DEFINE_integer("output_keep_prob", 0.5, "Dropout keep prob for outpus")
-tf.app.flags.DEFINE_string("cell", "LSTM", "cell type: LSTM,GRU,LNLSTM")
-tf.app.flags.DEFINE_integer("beta_period", 10, "number of epoches before increase Beta.")
-tf.app.flags.DEFINE_boolean("teacher_forcing", False, "Teacher forcing increases short term accuracy but penalizes long term gradient probagation.")
+tf.app.flags.DEFINE_string("cell", "UGRNN", "cell type: LSTM,GRU,LNLSTM")
+tf.app.flags.DEFINE_boolean("peephole",True,"use peephole for LSTM")
+tf.app.flags.DEFINE_integer("beta_offset", 15, "number of epoches before increasing Beta.")
+tf.app.flags.DEFINE_integer("beta_period", 30, "Beta will be increased from 0 to 1 during this period.")
+tf.app.flags.DEFINE_boolean("teacher_forcing", True, "Teacher forcing increases short term accuracy but penalizes long term gradient probagation.")
 #tf.app.flags.DEFINE_integer("beta_period", 1000, "Beta will rise from 0 to 1 during this number of iterations")
 #tf.app.flags.DEFINE_integer("beta_offset", 1000, "Beta will start rising after this number of iterations")
-tf.app.flags.DEFINE_float("latent_loss_weight", 0.01, "weight used to weaken the latent loss.")
+tf.app.flags.DEFINE_float("latent_loss_weight", 0.025, "weight used to weaken the latent loss.")
 tf.app.flags.DEFINE_integer("dtype_precision", 32, "dtype to be used: typically 32 or 16")
 tf.app.flags.DEFINE_boolean("initialize", False, "Initialize model or try to load existing one")
-tf.app.flags.DEFINE_string("training_dir" , "no_teacher_forcing", "repertory where checkpoints are logs are saved")
+tf.app.flags.DEFINE_string("training_dir" , "4layers_UGRNN", "repertory where checkpoints are logs are saved")
 FLAGS = tf.app.flags.FLAGS
 
 if FLAGS.training_dir == "auto":
@@ -77,7 +79,8 @@ else:
     print "found: " + str(FLAGS.training_dir)
     with open(FLAGS.training_dir +'/training_parameters.json', 'r') as fp:
         training_parameters = json.loads( fp.read() )
-    #training_parameters['learning_rate'] = 2e-4#FLAGS.initial_learning_rate
+    training_parameters['n_epoches_since_last_dataset_update'] = 0
+    training_parameters['learning_rate'] = 2e-4#FLAGS.initial_learning_rate
     
 
 # save details
@@ -102,7 +105,9 @@ batch_gen = Generator(sentences, ratings, FLAGS.batch_size)
 batch_gen.shuffle()
 num_iters = FLAGS.epoches * batch_gen.iterations_per_epoch()
 # deterministic warm-up control
-betaGenerator = BetaGenerator(num_iters, FLAGS.beta_period*batch_gen.iterations_per_epoch(), FLAGS.beta_period*batch_gen.iterations_per_epoch())
+beta_T = FLAGS.beta_period*batch_gen.iterations_per_epoch()
+beta_u = FLAGS.beta_offset*batch_gen.iterations_per_epoch()
+betaGenerator = BetaGenerator(num_iters, beta_T, beta_u)
 # text decoder ( text <-> ids)
 encoderDecoder = EncoderDecoder()
 # learning rate
@@ -117,6 +122,7 @@ vrae_model = Vrae_model(state_size=FLAGS.state_size,
                         latent_loss_weight=FLAGS.latent_loss_weight,
                          dtype_precision=FLAGS.dtype_precision,
                         cell_type=FLAGS.cell,
+                        peephole=FLAGS.peephole,
                          input_keep_prob= FLAGS.input_keep_prob,
                         output_keep_prob=FLAGS.input_keep_prob,
                        teacher_forcing=FLAGS.teacher_forcing)
@@ -151,18 +157,19 @@ try:
                 padded_batch_xs, batch_ys, batch_lengths, batch_weights, max_length = batch_gen.next_batch()
                 training_parameters['learning_rate'] = learningRateControler.learning_rate
                 beta = 0.0 + betaGenerator(training_parameters['step']) # add small value to points to scatter
-                _,d,summary,_ = vrae_model.step(sess, padded_batch_xs, beta, training_parameters['learning_rate'], batch_lengths, batch_weights, training_parameters['epoch'])
-                learningRateControler.update(d)
+                _,d,loss_reconstruction, loss_regularization, summary,_ = vrae_model.step(sess, padded_batch_xs, beta, training_parameters['learning_rate'], batch_lengths, batch_weights, training_parameters['epoch'])
+                if training_parameters['step'] > beta_T+beta_u: 
+                    learningRateControler.update(d)
                 summary_writer.add_summary(summary, global_step=training_parameters['step'])
                 if training_parameters['step'] % 10 == 0:
                     print("loss: " + str(d) + " | step: " + str(training_parameters['step'])  + " | beta: " + str(beta) + " | learning rate: " + str(learningRateControler.learning_rate) )
                 training_parameters['step'] += 1 
                 
                 # increase sentences size
-                if training_parameters['n_epoches_since_last_dataset_update'] > 5 and d < FLAGS.acceptable_accuracy and training_parameters['seq_max'] < sequence_max_max:
+                if training_parameters['n_epoches_since_last_dataset_update'] > 5 and loss_reconstruction < FLAGS.acceptable_accuracy and training_parameters['seq_max'] < sequence_max_max:
                     print "###########################\nUPDATING SENTENCES SIZE"
                     FLAGS.training_dir + '/model'+str(training_parameters['seq_max'])+'.ckp'
-                    n_epoches_since_last_dataset_update = 0
+                    training_parameters['n_epoches_since_last_dataset_update'] = 0
                     training_parameters['seq_max'] += 1
                     sentences, ratings = read_data( max_size=None,max_sentence_size=training_parameters['seq_max'],
                                                    min_sentence_size=FLAGS.sequence_min) 

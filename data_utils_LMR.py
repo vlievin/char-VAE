@@ -45,6 +45,8 @@ GO_ID = 1
 EOS_ID = 2
 UNK_ID = 3
 
+TEST_SET_LENGTH = 5000
+
 # Regular expressions used to tokenize.
 _WORD_SPLIT = re.compile(b"([.,!?\"':;)(])")
 _DIGIT_RE = re.compile(br"\d")
@@ -53,7 +55,9 @@ _DIGIT_RE = re.compile(br"\d")
 _DATA_URL_ = "http://ai.stanford.edu/~amaas/data/sentiment/aclImdb_v1.tar.gz"
 _DATA_DIR_ = 'data_LMR/'
 _SENTENCES_DIR = _DATA_DIR_+'sentences/'
+_TEST_SENTENCES_DIR = _DATA_DIR_+'test_sentences/'
 _TRAIN_DIRS_ = [_DATA_DIR_+ 'aclImdb/train/neg/', _DATA_DIR_ + 'aclImdb/train/pos/']
+_TEST_DIRS_ = [_DATA_DIR_+ 'aclImdb/test/neg/', _DATA_DIR_ + 'aclImdb/test/pos/']
 _VOCAB_DIR_ = _DATA_DIR_+'vocab.dat'
 
 nlp = spacy.load('en')
@@ -260,7 +264,39 @@ def data_to_token_ids(data_paths, target_path, vocabulary_path,
                                                             tokenizer, normalize_digits)
                                 tokens_file.write(str(rating) + '|' + " ".join([str(tok) for tok in token_ids]) + "\n")
                                 #sentiments_files.write( str(rating) + "\n")
-                            
+
+                                
+def moveLinesFromFileToFile(source_file_path, target_file_path, lines_to_keep):
+    """
+    copy some lines from a files and append them to another files. lines 
+    copied from the source file are deleted from the source. the parameter 
+    lines_to_keep indicates the number of lines to keep in the source file
+    
+    Args:
+        source_file_path: file to copy from
+        target_file_path: file to copy to
+        lines_to_kepp: lines to keep in the source_file
+    """
+    #num_lines = sum(1 for line in tf.gfile.GFile(source_file, mode="r"))
+    saved_lines = []
+    with tf.gfile.GFile(source_file_path, mode="r") as source_file:
+        with tf.gfile.GFile(target_file_path, mode="a") as target_file:
+            source = source_file.readline()
+            counter = 0
+            while source:
+                if counter < lines_to_keep:
+                    saved_lines.append(source)
+                else:
+                    target_file.write(source)
+                counter += 1
+                source = source_file.readline()
+    #delete target and rewrite lines to keep
+    os.remove(source_file_path)
+    with gfile.GFile(source_file_path, mode="w") as source_file:
+        for row in saved_lines:
+            source_file.write(row)
+    
+
 def prepare_data(vocabulary_size):
     """
     Download the Large Movie Review Dataset, create the vocabulary 
@@ -275,20 +311,28 @@ def prepare_data(vocabulary_size):
     create_vocabulary( _VOCAB_DIR_, _TRAIN_DIRS_, vocabulary_size )
     print("Converting sentences to sequences of ids..")
     data_to_token_ids( _TRAIN_DIRS_ , _SENTENCES_DIR, _VOCAB_DIR_ )
+    data_to_token_ids( _TEST_DIRS_ , _TEST_SENTENCES_DIR, _VOCAB_DIR_ )
+    print("Moving some line from test set to train set..")
+    moveLinesFromFileToFile(_TEST_SENTENCES_DIR+"sentences.txt", _SENTENCES_DIR+"sentences.txt", TEST_SET_LENGTH)
     
 
-def read_data(max_size=None, max_sentence_size=None, min_sentence_size=10):
+def read_data(max_size=None, max_sentence_size=None, min_sentence_size=10, test=False):
     """Read data from source.
     Args:
-    max_size: maximum number of lines to read, all other will be ignored;
+        max_size: maximum number of lines to read, all other will be ignored;
       if 0 or None, data files will be read completely (no limit).
-    max_sentence_size: maximum size of sentences
+        max_sentence_size: maximum size of sentences
+        min_sentence_size: minimum sentence length
+        test_set (boolean): use test dataset of note
     Returns:
-    data_set: training data
+        data_set: training data
     """
     sentences = []
     ratings = []
-    with tf.gfile.GFile(_DATA_DIR_+'sentences/sentences.txt', mode="r") as source_file:
+    PATH = _SENTENCES_DIR
+    if test:
+        PATH = _TEST_SENTENCES_DIR
+    with tf.gfile.GFile(PATH +'sentences.txt', mode="r") as source_file:
         source = source_file.readline()
         counter = 0
         while source and (not max_size or counter < max_size):
@@ -334,6 +378,9 @@ class EncoderDecoder:
         s = s.replace("_EOS", "" )
         s = s.replace("_PAD", "" )
         s = s.replace("_", " " )
+        for u in ['.','?','!']:
+            if u in s:
+                s = s.split(u)[0]+u
         return s
     
     def vocabularySize(self):
