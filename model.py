@@ -23,12 +23,32 @@ from tensorflow.python.ops import tensor_array_ops
 
 
 class Vrae:
-    def __init__(self, state_size, num_layers, latent_dim, batch_size, num_symbols, input_keep_prob,output_keep_prob, latent_loss_weight, dtype_precision, cell_type, peephole, teacher_forcing=True):
+    def __init__(self, char2word_state_size, 
+                 char2word_num_layers, 
+                 encoder_state_size, 
+                 encoder_num_layers, 
+                 decoder_state_size, 
+                 decoder_num_layers, 
+                 latent_dim, 
+                 batch_size, 
+                 num_symbols, 
+                 input_keep_prob,
+                 output_keep_prob, 
+                 latent_loss_weight, 
+                 dtype_precision, 
+                 cell_type, 
+                 peephole, 
+                 sentiment_feature = False,
+                 teacher_forcing=True):
         """
         Initi Variational Recurrent Autoencoder (VRAE) for sequences. The model clears the current tf graph and implements this model as the new graph. 
         Args:
-            state_size (Natural Integer): size of the states of the RNN cells (encoder and decoder)
-            num_layers (Natural Integer): number of layers in the RNN cells
+            char2word_state_size (Natural Integer): size of the state of the RNN cells in the char2word RNN
+            char2word_num_layers (Natural Integer): size of the state of the RNN cells in the char2word RNN
+            encoder_state_size (Natural Integer): size of the states of the RNN cells in the encoder (word level)
+            encoder_num_layers (Natural Integer): number of layers in the RNN cells of the encoder (word level)
+            decoder_state_size (Natural Integer): size of the states of the RNN cells in the decoder (char level)
+            decoder_num_layers (Natural Integer): number of layers in the RNN cells of the decoder (char level)
             latent_dim (Natural Integer): dimension of the latent space
             batch_size (Natural Integer): batch size
             num_symbols (Natural Integer): number of symbols in the data (number of unique characters if used with characters or vocabulary size if used with words)
@@ -38,6 +58,7 @@ class Vrae:
             dtype_precision (Integer): dtype precision
             cell_type (string): type of cell: LSTM,GRU,LNLSTM
             peephole (boolean): use peepholes or not for LSTM
+            sentiment_feature (boolean): input sentiment_feature
             teacher_forcing (bool): use teacher forcing during training
         Returns 
         """
@@ -49,12 +70,16 @@ class Vrae:
         tf.reset_default_graph()
         self.batch_size_value = batch_size
         # placeholders
+        self.use_sentiment_feature = sentiment_feature
+        self.sentiment_feature = tf.placeholder( dtype , [None,3] , name="sentiment_feature")
         self.batch_size = tf.placeholder( tf.int32 , name='batch_size')
         self.input_keep_prob_value = input_keep_prob
         self.output_keep_prob_value = output_keep_prob
         self.x_input = tf.placeholder( tf.int32, [None, None], name='input_placeholder')
         self.x_input_lenghts = tf.placeholder(shape=(None,), dtype=tf.int32, name='encoder_inputs_length')
         self.weights_input = tf.placeholder( tf.int32, [None, None], name='weights_placeholder')
+        self.end_of_words = tf.placeholder( tf.int32, [None, None, 2], name='end_of_words_placeholder')
+        self.batch_word_lengths = tf.placeholder(shape=(None,), dtype=tf.int32, name='encoder_inputs_word_length')
         self.input_keep_prob = tf.placeholder(dtype,name="input_keep_prob")
         self.output_keep_prob = tf.placeholder(dtype,name="output_keep_prob")
         self.max_sentence_size = tf.reduce_max(self.x_input_lenghts )
@@ -73,15 +98,34 @@ class Vrae:
         with tf.name_scope("input_transformations"):
             inputs_onehot = tf.one_hot(self.x_input, num_symbols, axis= -1, dtype=dtype)   # one hot encoding
             data_dim = int(inputs_onehot.shape[2])
-            rnn_inputs = tf.reverse(inputs_onehot, [1])   # reverse input
+            #rnn_inputs = tf.reverse(inputs_onehot, [1])   # reverse input
+            rnn_inputs = inputs_onehot
         
         # encoder
-        encoder_output = encoder(state_size, num_layers, rnn_inputs, dtype,cell_type, peephole, self.input_keep_prob, self.output_keep_prob, scope="encoder")     
+        encoder_output = char2word_encoder(char2word_state_size,
+                                           char2word_num_layers, 
+                                           encoder_state_size, 
+                                           encoder_num_layers,
+                                           rnn_inputs, 
+                                           self.x_input_lenghts, 
+                                           self.end_of_words, 
+                                           self.batch_word_lengths, 
+                                           self.batch_size, 
+                                           dtype,
+                                           cell_type, 
+                                           peephole, 
+                                           self.input_keep_prob, 
+                                           self.output_keep_prob) 
+        # sentiment feature
+        if self.use_sentiment_feature:
+            stochastic_layer_input = tf.concat( [self.sentiment_feature , encoder_output] , 1)
+        else:
+            stochastic_layer_input = encoder_output
         # stochastic layer
-        self.z, self.z_mu, self.z_ls2 = stochasticLayer(encoder_output, latent_dim, self.batch_size,
+        self.z, self.z_mu, self.z_ls2 = stochasticLayer(stochastic_layer_input, latent_dim, self.batch_size,
                                                         dtype, scope="stochastic_layer")
         # decoder
-        self.decoder_output = decoder(self.z, self.batch_size, state_size, num_layers, 
+        self.decoder_output = decoder(self.z, self.batch_size, decoder_state_size, decoder_num_layers, 
                                       data_dim, self.x_input_lenghts, cell_type, peephole,
                                       self.input_keep_prob, self.output_keep_prob, inputs_onehot, self.training,dtype, scope="decoder") 
         # loss
@@ -93,7 +137,7 @@ class Vrae:
         # merge summaries: summarize variables
         self.merged_summary = tf.summary.merge_all()
     
-    def step(self, sess, padded_batch_xs, beta, learning_rate, batch_lengths, batch_weights, epoch) :
+    def step(self, sess, padded_batch_xs, beta, learning_rate, batch_lengths, batch_weights, end_of_words_value, batch_word_lengths_value, epoch,sentiment_feature) :
         """ 
         train the model for one step
         Args:
@@ -103,7 +147,10 @@ class Vrae:
             learning_rate: learning rate (potentially controled during training)
             batch_lengths: sentences lengths 
             batch_weights: sentences weights
+            end_of_words_value: indexes of end of words (spaces)
+            batch_word_lengths_value: number of words
             epoch: current epoch
+            sentiment_feature: sentiment feature
         Returns:
             a tuple of values:
                 optimizer op
@@ -119,16 +166,22 @@ class Vrae:
                                                            self.output_keep_prob:self.output_keep_prob_value,
                                                            self.epoch: epoch,
                                                            self.batch_size:self.batch_size_value,
-                                                           self.training: self.teacher_forcing
+                                                           self.end_of_words: end_of_words_value,
+                                                           self.batch_word_lengths:batch_word_lengths_value,
+                                                           self.training: self.teacher_forcing,
+                                                           self.sentiment_feature:sentiment_feature
                                                             })
     
-    def reconstruct(self, sess, padded_batch_xs, batch_lengths, batch_weights):
+    def reconstruct(self, sess, padded_batch_xs, batch_lengths, batch_weights,end_of_words_value,batch_word_lengths_value,sentiment_feature):
         """
         Feed a batch of inputs and reconstruct it
         Args:
             sess: current Tensorflow session
             padded_batch_xs: padded input batch
             batch_lengths: sentences lengths 
+            end_of_words_value: indexes of corresponding to the end of words
+            batch_word_lengths_value: word lengths
+            sentiment_feature : sentiment features
         Returns:
             tuple x_reconstruct,z_vals,z_mean_val,z_log_sigma_sq_val, sequence_loss
                 x_reconstruct: reconstruction of the input
@@ -145,6 +198,9 @@ class Vrae:
                                    self.input_keep_prob:1, 
                                    self.output_keep_prob:1,
                                    self.batch_size:self.batch_size_value,
+                                   self.end_of_words: end_of_words_value,
+                                   self.batch_word_lengths:batch_word_lengths_value,
+                                   self.sentiment_feature: sentiment_feature,
                                    self.training: False})
     
     def zToX(self,sess,z_sample,s_length):
@@ -169,26 +225,98 @@ class Vrae:
                                                           self.x_input:none_input
                                                          })
     
-    def XToz(self,sess,x_sample):
+    def XToz(self,sess,seq_ids,seq_len,words_endings,seq_words_len, sentiment):
         """
         Project X to the latent space Z
         Args:
             sess: current Tensorflow session
-            x_sample: sequence (list of Integers)
+            seq_ids:
+            seq_len:
+            words_endings:
+            seq_words_len:
+            sentiment:
         Returns:
             x generated from z 
         """
-        x_samples = [x_sample]
-        return sess.run((self.z_mu), feed_dict={self.x_input: x_samples,
+        return sess.run((self.z_mu), feed_dict={self.x_input: [seq_ids],
+                                                   self.x_input_lenghts:[seq_len],
+                                                   self.end_of_words: [words_endings],
+                                                   self.batch_word_lengths:[seq_words_len],
                                                 self.input_keep_prob:1, 
                                                 self.output_keep_prob:1,
                                                 self.batch_size:1,
+                                                self.sentiment_feature:[sentiment],
                                                 self.training: False})
+    
+def char2word_encoder( char2word_state_size, 
+                      char2word_num_layers, 
+                      encoder_state_size, 
+                      encoder_num_layers,
+                      rnn_inputs,
+                      batch_char_lengths, 
+                      end_of_words, 
+                      batch_word_lengths, 
+                      batch_size, 
+                      dtype, 
+                      cell_type, 
+                      peephole, 
+                      input_keep_prob, 
+                      output_keep_prob,
+                      scope = "hierarchical_encoder"):
+    # cell type
+    if cell_type == 'GRU':
+        cell_fn = tf.contrib.rnn.GRUCell
+    elif cell_type == 'LSTM':
+        cell_fn = tf.contrib.rnn.LSTMCell
+    elif cell_type == 'LNLSTM':
+        cell_fn = tf.contrib.rnn.LayerNormBasicLSTMCell
+    elif cell_type == "UGRNN":
+        cell_fn = tf.contrib.rnn.UGRNNCell
+    elif cell_type == "GLSTM":
+        cell_fn = tf.contrib.rnn.GLSTMCell
+    elif cell_type == "LSTMBlockFusedCell":
+        cell_fn = tf.contrib.rnn.LSTMBlockFusedCell
+                
+    with tf.name_scope(scope):
+        with tf.name_scope("char2word_encoder"):
+            # char2RNN cell
+            cell_fn = tf.contrib.rnn.LSTMCell
+            cells = []
+            for _ in range(2 * char2word_num_layers):
+                cell = cell_fn(char2word_state_size)
+                cell = tf.contrib.rnn.DropoutWrapper( cell, output_keep_prob=output_keep_prob, input_keep_prob=input_keep_prob)
+                cells.append(cell)
+            cell_fw = tf.contrib.rnn.MultiRNNCell( cells[:char2word_num_layers] )
+            cell_bw = tf.contrib.rnn.MultiRNNCell( cells[char2word_num_layers:] )
+            # char2word RNN
+            char_rnn_outputs, _ = tf.nn.bidirectional_dynamic_rnn(cell_fw, cell_bw, rnn_inputs, sequence_length = batch_char_lengths, dtype=dtype, scope="char2word_encoder_rnn")   
+            char_rnn_outputs = tf.concat([ char_rnn_outputs[0][:, :1 , :]  , char_rnn_outputs[1][:, :-1 , :]   ] , 1) # bw outputs are already reversed
+            # gather
+            rnn_words_outputs = tf.gather_nd(char_rnn_outputs, end_of_words)
+        with tf.name_scope("char2word_encoder"):
+            # encoder cell
+            cell_fn = tf.contrib.rnn.LSTMCell
+            cells = []
+            for _ in range(2*encoder_num_layers):
+                cell = cell_fn(encoder_state_size)
+                cell = tf.contrib.rnn.DropoutWrapper( cell, output_keep_prob=output_keep_prob, input_keep_prob=input_keep_prob)
+                cells.append(cell)
+            word_cell_fw = tf.contrib.rnn.MultiRNNCell( cells[:encoder_num_layers] )
+            word_cell_bw = tf.contrib.rnn.MultiRNNCell( cells[encoder_num_layers:] )
+            # encoder RNN
+            _, sentence_encoder_final_state = tf.nn.bidirectional_dynamic_rnn(word_cell_fw, word_cell_bw, rnn_words_outputs, sequence_length=batch_word_lengths, dtype=dtype, scope="sentence_encoder_rnn")
+            if cell_type == 'LSTM' or cell_type == "UGRNN" or cell_type == "LNLSTM" or cell_type == "GRU":
+                sentence_encoder_final_state = tf.concat([ state[encoder_num_layers-1][0] for state in sentence_encoder_final_state] , 1)
+            else:
+                sentence_encoder_final_state = tf.concat([ state[encoder_num_layers-1] for state in sentence_encoder_final_state] , 1)
+        return sentence_encoder_final_state
+    
     
     
 def encoder(state_size, num_layers, rnn_inputs, dtype, cell_type, peephole, input_keep_prob, output_keep_prob, scope="encoder"):
     """
     Encoder of the VRAE model. It corresponds to the approximation of p(z|x), thus encodes the inputs x into a higher level representation z. The encoder is Dynamic Recurrent Neural Network which takes a batch of sequence of arbitray lengths as inputs. The output is the last state of the last cell and corresponds to a representation of the whole input.
+    This is the character-level encoder.
     Args:
         state_size (Natural Integer): state size for the RNN cell
         num_layers (Natural Integer): number of layers for the the RNN cell
@@ -225,7 +353,7 @@ def encoder(state_size, num_layers, rnn_inputs, dtype, cell_type, peephole, inpu
             cell_fw = tf.contrib.rnn.MultiRNNCell( cells[:num_layers] )
             cell_bw = tf.contrib.rnn.MultiRNNCell( cells[num_layers:] )
             rnn_outputs, final_state = tf.nn.bidirectional_dynamic_rnn(cell_fw, cell_bw, rnn_inputs, dtype=dtype, scope="Encoder_rnn")
-        if cell_type == 'LSTM' or cell_type == 'LNLSTM':
+        if cell_type == 'LSTM' or cell_type == 'UGRNN':
             final_state = tf.concat([ state[num_layers-1][0] for state in final_state] , 1)
         else:
             final_state = tf.concat([ state[num_layers-1] for state in final_state] , 1)
@@ -392,8 +520,6 @@ def decoder(z, batch_size, state_size, num_layers, data_dim, x_input_lenghts, ce
             cell_fn = tf.contrib.rnn.UGRNNCell
         elif cell_type == "GLSTM":
             cell_fn = tf.contrib.rnn.GLSTMCell
-        elif cell_type == "LSTMBlockFusedCell":
-            cell_fn = tf.contrib.rnn.LSTMBlockFusedCell
         cells = []
         for _ in range(num_layers):
             cell = cell_fn(state_size)
@@ -408,6 +534,7 @@ def decoder(z, batch_size, state_size, num_layers, data_dim, x_input_lenghts, ce
         decoder_outputs_flat = tf.reshape(rnn_outputs_decoder, (-1, state_size))
         decoder_logits_flat = tf.add(tf.matmul(decoder_outputs_flat, W_proj), b_proj)
         rnn_outputs_decoder = tf.transpose( tf.reshape(decoder_logits_flat, (decoder_max_steps, batch_size, data_dim)) , [1,0,2])
+        # no softmax here: softmax is applied in the loss function 
         return rnn_outputs_decoder
                     
 

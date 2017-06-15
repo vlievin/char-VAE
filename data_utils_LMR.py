@@ -62,6 +62,7 @@ _VOCAB_DIR_ = _DATA_DIR_+'vocab.dat'
 
 nlp = spacy.load('en')
 character_pattern = re.compile('([^\s\w\'\.\!\,\?]|_)+')
+special_character_pattern = re.compile(r"([\'\.\!\,\?])")
 
 def to_unicode(text, encoding='utf8', errors='strict'):
     """Convert a string (bytestring in `encoding` or unicode), to unicode."""
@@ -96,8 +97,16 @@ def character_tokenizer(sentence):
     Return:
         a list of characters
     """
+    # remove non alphanumeric characters
     sentence = character_pattern.sub('', sentence)
+    # add spaces before and after special characters
+    sentence  = special_character_pattern.sub(" \\1 ", sentence)
+    #remove redondant spaces
+    sentence = re.sub(' +',' ',sentence)
+    # replace spaces with "_"
     sentence = sentence.replace(' ', '_')
+    sentence= sentence[:len(sentence)-1]
+    # remove last space
     return list(sentence.lower())
 
 def maybe_download(directory, filename, url):
@@ -223,7 +232,8 @@ def sentence_to_token_ids(sentence, vocabulary,
     if not normalize_digits:
         return [vocabulary.get(w, UNK_ID) for w in words]
     # Normalize digits by 0 before looking words up in the vocabulary.
-    output =  [vocabulary.get(_DIGIT_RE.sub(b"0", w), UNK_ID) for w in words]
+    output = [GO_ID]
+    output +=  [vocabulary.get(_DIGIT_RE.sub(b"0", w), UNK_ID) for w in words]
     output += [EOS_ID]
     return output
 
@@ -257,9 +267,10 @@ def data_to_token_ids(data_paths, target_path, vocabulary_path,
                         rating = one_file.split('/')[-1].split('.')[0].split('_')[-1]
                         review = cleanHTML( f.read() )
                         for sentence in sentence_tokenizer(review):
-                            if len(sentence) > 10: # don't save short sentences
+                            if len(sentence) > 3: 
                                 while sentence[0] == " ":
-                                    sentence = sentence[1:]
+                                    if len(sentence) > 2:
+                                        sentence = sentence[1:]
                                 token_ids = sentence_to_token_ids(tf.compat.as_bytes(sentence), vocab,
                                                             tokenizer, normalize_digits)
                                 tokens_file.write(str(rating) + '|' + " ".join([str(tok) for tok in token_ids]) + "\n")
@@ -364,6 +375,26 @@ class EncoderDecoder:
         """
         return sentence_to_token_ids(sentence, self.vocab)
     
+    def encodeForTraining(self,sentence):
+        """
+        Encode a sentence at the character and word level and return training parameters
+        input:
+            Sentence (String): input sentence
+        Returns:
+            seq_ids: list of ids
+            seq_len : length of the sentence
+            words_endings: list of indexes corresponding to the end of the words
+            seq_words_len: lenght of the sentence in words
+        """
+        seq_ids = self.encode(sentence)
+        seq_len = len(seq_ids)
+        space_symbol = self.encode("I am")[1]
+        word_delimiters = [ EOS_ID, GO_ID, space_symbol ]
+        words_endings = [i for i, j in enumerate(seq_ids) if j in word_delimiters]
+        words_endings = [ [0,x] for x in words_endings ]
+        seq_words_len = len(words_endings)
+        return seq_ids,seq_len,words_endings,seq_words_len
+        
     def decode(self, seq):
         """
         Decode a sequence of ids to a sentence
@@ -375,9 +406,15 @@ class EncoderDecoder:
         decode and return a nicely formatted string
         """
         s = "".join(self.decode(seq))
+        s = s.replace("_GO", "" )
         s = s.replace("_EOS", "" )
         s = s.replace("_PAD", "" )
         s = s.replace("_", " " )
+        s = s.replace(" ,", "," )
+        s = s.replace(" .", "." )
+        s = s.replace(" !", "!" )
+        s = s.replace(" ?", "?" )
+        s = s.replace(" '", "'" )
         for u in ['.','?','!']:
             if u in s:
                 s = s.split(u)[0]+u

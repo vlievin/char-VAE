@@ -16,13 +16,14 @@ import numpy as np
 from operator import itemgetter 
 
 class Generator:
-    def __init__(self, x, y, batch_size):
+    def __init__(self, x, y, batch_size, word_delimiters):
         """
         initialize the class with inputs 'x' and labels 'y'
         Args:
             x (list of Objects): list of inputs
             y (list of Objects): list of labels
             batch_size (Natural Interger): number of elements to be produced at each iteration
+            word_delimiters (list of Natural Integer): list of the symbols corresponding to spaces in the vocabulary
         """
         self.x = x
         self.y = y
@@ -30,6 +31,7 @@ class Generator:
         self.index = list(xrange(len(x)))
         self.n_steps = len(x) // batch_size
         self.step = 0
+        self.word_delimiters = word_delimiters
         assert len(self.x) == len(self.y)
         assert self.n_steps > 0
         
@@ -87,16 +89,19 @@ class Generator:
                 batch_ys: the list of corresponding labels
                 batch_lengths: the list of sequence lengths
                 batch_weights: a list of weights corresponding to 0 if it's a padded element, 0 otherwise
+                end_of_words: a list of indexes corresponding to the end of the words
                 max_length: the maximum length in the current batch
-                batch_ys: labels
         """
         batch_xs, batch_ys = self.raw_batch()
         batch_lengths = [len(x) for x in batch_xs]
         max_length = max(batch_lengths)
         padded_batch_xs = [ self.pad(d, max_length) for d in batch_xs ]
         batch_weights = [ [ 1 if dd>0 else 0 for dd in d] for d in padded_batch_xs]
-        batch_ys
-        return padded_batch_xs, batch_ys, batch_lengths, batch_weights, max_length
+        end_of_words = [ [i for i, j in enumerate(sentence) if j in self.word_delimiters] for sentence in batch_xs]
+        batch_word_lengths = [len(x) for x in end_of_words]
+        max_words = max(batch_word_lengths)
+        padded_end_of_words = [ [ [k,x] for x in self.pad(d, max_words) ] for k,d in enumerate(end_of_words) ]
+        return padded_batch_xs, batch_ys, batch_lengths, batch_weights, padded_end_of_words, batch_word_lengths, max_length
         
         
     
