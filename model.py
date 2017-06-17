@@ -39,7 +39,8 @@ class Vrae:
                  cell_type, 
                  peephole, 
                  sentiment_feature = False,
-                 teacher_forcing=True):
+                 teacher_forcing=True,
+                 use_char2word =False):
         """
         Initi Variational Recurrent Autoencoder (VRAE) for sequences. The model clears the current tf graph and implements this model as the new graph. 
         Args:
@@ -60,6 +61,7 @@ class Vrae:
             peephole (boolean): use peepholes or not for LSTM
             sentiment_feature (boolean): input sentiment_feature
             teacher_forcing (bool): use teacher forcing during training
+            use_char2word (book): use the char2word layer
         Returns 
         """
         if dtype_precision==16:
@@ -102,20 +104,31 @@ class Vrae:
             rnn_inputs = inputs_onehot
         
         # encoder
-        encoder_output = char2word_encoder(char2word_state_size,
-                                           char2word_num_layers, 
-                                           encoder_state_size, 
-                                           encoder_num_layers,
-                                           rnn_inputs, 
-                                           self.x_input_lenghts, 
-                                           self.end_of_words, 
-                                           self.batch_word_lengths, 
-                                           self.batch_size, 
-                                           dtype,
-                                           cell_type, 
-                                           peephole, 
-                                           self.input_keep_prob, 
-                                           self.output_keep_prob) 
+        if use_char2word:
+            encoder_output = char2word_encoder(char2word_state_size,
+                                               char2word_num_layers, 
+                                               encoder_state_size, 
+                                               encoder_num_layers,
+                                               rnn_inputs, 
+                                               self.x_input_lenghts, 
+                                               self.end_of_words, 
+                                               self.batch_word_lengths, 
+                                               dtype,
+                                               cell_type, 
+                                               peephole, 
+                                               self.input_keep_prob, 
+                                               self.output_keep_prob) 
+        else:
+            encoder_output = encoder(encoder_state_size, 
+                                               encoder_num_layers,
+                                               rnn_inputs, 
+                                               self.x_input_lenghts, 
+                                               dtype,
+                                               cell_type, 
+                                               peephole, 
+                                               self.input_keep_prob, 
+                                               self.output_keep_prob) 
+            
         # sentiment feature
         if self.use_sentiment_feature:
             stochastic_layer_input = tf.concat( [self.sentiment_feature , encoder_output] , 1)
@@ -256,7 +269,6 @@ def char2word_encoder( char2word_state_size,
                       batch_char_lengths, 
                       end_of_words, 
                       batch_word_lengths, 
-                      batch_size, 
                       dtype, 
                       cell_type, 
                       peephole, 
@@ -313,7 +325,7 @@ def char2word_encoder( char2word_state_size,
     
     
     
-def encoder(state_size, num_layers, rnn_inputs, dtype, cell_type, peephole, input_keep_prob, output_keep_prob, scope="encoder"):
+def encoder(state_size, num_layers, rnn_inputs, batch_char_lengths, dtype, cell_type, peephole, input_keep_prob, output_keep_prob, scope="encoder"):
     """
     Encoder of the VRAE model. It corresponds to the approximation of p(z|x), thus encodes the inputs x into a higher level representation z. The encoder is Dynamic Recurrent Neural Network which takes a batch of sequence of arbitray lengths as inputs. The output is the last state of the last cell and corresponds to a representation of the whole input.
     This is the character-level encoder.
@@ -352,7 +364,7 @@ def encoder(state_size, num_layers, rnn_inputs, dtype, cell_type, peephole, inpu
                 cells.append(cell)
             cell_fw = tf.contrib.rnn.MultiRNNCell( cells[:num_layers] )
             cell_bw = tf.contrib.rnn.MultiRNNCell( cells[num_layers:] )
-            rnn_outputs, final_state = tf.nn.bidirectional_dynamic_rnn(cell_fw, cell_bw, rnn_inputs, dtype=dtype, scope="Encoder_rnn")
+            rnn_outputs, final_state = tf.nn.bidirectional_dynamic_rnn(cell_fw, cell_bw, rnn_inputs, sequence_length = batch_char_lengths, dtype=dtype, scope="Encoder_rnn")
         if cell_type == 'LSTM' or cell_type == 'UGRNN':
             final_state = tf.concat([ state[num_layers-1][0] for state in final_state] , 1)
         else:

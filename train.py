@@ -36,32 +36,33 @@ def getSentimentScore(sentence):
 
 
 # flags
-tf.app.flags.DEFINE_integer( "char2word_state_size", 512, "char2word hidden state size ")
+tf.app.flags.DEFINE_integer( "char2word_state_size", 256, "char2word hidden state size ")
 tf.app.flags.DEFINE_integer( "char2word_num_layers", 2, "char2word num layers ")
 tf.app.flags.DEFINE_integer( "encoder_state_size", 1024, "encoder RNN hidden state size")
-tf.app.flags.DEFINE_integer( "encoder_num_layers", 1, "encoder RNN num layers ")
-tf.app.flags.DEFINE_float("initial_learning_rate", 0.001, "initial learning rate")
+tf.app.flags.DEFINE_integer( "encoder_num_layers", 2, "encoder RNN num layers ")
+tf.app.flags.DEFINE_float("initial_learning_rate", 0.01, "initial learning rate")
 tf.app.flags.DEFINE_integer("decoder_state_size", 1024, "state size for the RNN cells (decoder)")
 tf.app.flags.DEFINE_integer("decoder_num_layers", 2, "number of layers used in the RNN cells (decoder)")
 tf.app.flags.DEFINE_float("learning_rate_change_rate", 3000, "after a changement of hyper-parameters during training, the learning rate stays fixed during this number of steps.")
 tf.app.flags.DEFINE_integer("latent_dim", 16, "dimension of the latent space")
-tf.app.flags.DEFINE_integer("batch_size", 1048, "length of each batch")
+tf.app.flags.DEFINE_integer("batch_size", 800, "length of each batch")
 tf.app.flags.DEFINE_integer("sequence_min", 8, "minimum number of characters")
-tf.app.flags.DEFINE_integer("sequence_max", 45, "maximum number of characters")
+tf.app.flags.DEFINE_integer("sequence_max", 35, "maximum number of characters")
 tf.app.flags.DEFINE_integer("epoches", 10000, "Number of epoches")
 tf.app.flags.DEFINE_integer("acceptable_accuracy", 0.4, "Increase sentences length when the model reaches this accuracy")
 tf.app.flags.DEFINE_integer("input_keep_prob", 0.9, "Dropout keep prob for inputs")
 tf.app.flags.DEFINE_integer("output_keep_prob", 0.5, "Dropout keep prob for outpus")
-tf.app.flags.DEFINE_string("cell", "LSTM", "cell type: LSTM,GRU,LNLSTM,UGRNN")
+tf.app.flags.DEFINE_string("cell", "GRU", "cell type: LSTM,GRU,LNLSTM,UGRNN")
 tf.app.flags.DEFINE_boolean("peephole",True,"use peephole for LSTM")
 tf.app.flags.DEFINE_integer("beta_offset", 15, "number of epoches before increasing Beta.")
-tf.app.flags.DEFINE_integer("beta_period", 100, "Beta will be increased from 0 to 1 during this period.")
+tf.app.flags.DEFINE_integer("beta_period", 500, "Beta will be increased from 0 to 1 during this period.")
 tf.app.flags.DEFINE_boolean("use_sentiment_feature", True, "Input sentiment features in the stochastic layer.")
+tf.app.flags.DEFINE_boolean("use_char2word", False, "Use the char2word layer in the encoder")
 tf.app.flags.DEFINE_boolean("teacher_forcing", True, "Teacher forcing increases short term accuracy but penalizes long term gradient probagation.")
-tf.app.flags.DEFINE_float("latent_loss_weight", 0.005, "weight used to weaken the latent loss.")
+tf.app.flags.DEFINE_float("latent_loss_weight", 0.1, "weight used to weaken the latent loss.")
 tf.app.flags.DEFINE_integer("dtype_precision", 32, "dtype to be used: typically 32 or 16")
-tf.app.flags.DEFINE_boolean("initialize", True, "Initialize model or try to load existing one")
-tf.app.flags.DEFINE_string("training_dir" , "sentiment_input_deep", "repertory where checkpoints are logs are saved")
+tf.app.flags.DEFINE_boolean("initialize", False, "Initialize model or try to load existing one")
+tf.app.flags.DEFINE_string("training_dir" , "sentiment_input", "repertory where checkpoints are logs are saved")
 FLAGS = tf.app.flags.FLAGS
 
 if FLAGS.training_dir == "auto":
@@ -69,7 +70,7 @@ if FLAGS.training_dir == "auto":
 else:
     FLAGS.training_dir = "logs/"+FLAGS.training_dir
     
-seq_max_init = min( 30, FLAGS.sequence_max)
+seq_max_init = min( 40, FLAGS.sequence_max)
 sequence_max_max = FLAGS.sequence_max
 FLAGS.sequence_max = seq_max_init
     
@@ -92,7 +93,7 @@ else:
     with open(FLAGS.training_dir +'/training_parameters.json', 'r') as fp:
         training_parameters = json.loads( fp.read() )
     training_parameters['n_epoches_since_last_dataset_update'] = 0
-    training_parameters['learning_rate'] = 0.0005 #2e-4#FLAGS.initial_learning_rate
+    #training_parameters['learning_rate'] = 0.0008 #2e-4#FLAGS.initial_learning_rate
     
 
 # save details
@@ -147,7 +148,8 @@ vrae_model = Vrae_model(char2word_state_size = FLAGS.char2word_state_size,
                      cell_type = FLAGS.cell, 
                      peephole = False, 
                      sentiment_feature = FLAGS.use_sentiment_feature,
-                     teacher_forcing=True)
+                     teacher_forcing=True,
+                     use_char2word = FLAGS.use_char2word)
 
 config = tf.ConfigProto(
         #device_count = {'GPU': 0},
@@ -208,11 +210,11 @@ try:
                                                    min_sentence_size=FLAGS.sequence_min) 
                     batch_gen = Generator(sentences, ratings, FLAGS.batch_size,word_delimiters)
                     learningRateControler.reset()
-                
+            
+            print "saving to", checkpoint_path
             training_parameters['epoch'] += 1
-            checkpoint_path = saver.save(sess, checkpoint_path)
-            print "saved to", checkpoint_path
             training_parameters['n_epoches_since_last_dataset_update'] += 1
+            checkpoint_path = saver.save(sess, checkpoint_path)
             with open(FLAGS.training_dir +'/training_parameters.json', 'w') as fp:
                 json.dump( training_parameters , fp)
             
