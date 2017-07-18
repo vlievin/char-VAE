@@ -1,7 +1,7 @@
 # VRAE-Tensorflow
 A Variational Recurrent Autoencoder implemented with TensorFlow. This model is part of my Master Thesis project which aims to adapt linguistic style
 
-# Abstract
+## Abstract
 
 This thesis reviews the use of neural networks to build a general natural language model and evaluate its application to the task of linguistic style adaptation. We name style adaptation the process of transforming a sentence into another sentence which conveys the same meaning but uses a different linguistic style. This work has been strongly influenced by the algorithm for artistic style proposed in the computer vision field.
 
